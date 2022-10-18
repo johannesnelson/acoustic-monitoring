@@ -47,7 +47,3 @@ batchPatternMatch <- function (dir, temp, score.cutoff = 'default', results = 'b
   }
 }
 
-
-
-
-
