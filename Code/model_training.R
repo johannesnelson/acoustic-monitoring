@@ -1,8 +1,21 @@
-### THIS IS NOT A WORKSPACE, THESE FUNCTIONS ARE THE FINALIZED FORM OF WHAT WAS DEVELOPED IN SCRATCHPAD AND SERVE TO ASSIST SUPERVISED ML 
+library(data.table)
+library(tuneR)
+library(seewave)
+
+
+## All of these functions are in development. The goal is to have an easy way to do feature extraction, model training, and predicting
+## in order to be able to create ML classifiers that might perform better than birdNET on certain species (e.g. rails, owls)
 
 
 
-# This functions will extract acoustic features from a df based on filepath, start, and end time. 
+# This functions will extract acoustic features from a dataframe based on filepath, start, and end time. amp.data is raw amplitude data
+# and takes a long time to run. It also may be unnecessary. zcr.data will extrract zero crossing rate info using seewave's zcr() function,
+# acoustat data uses seewave's acoustat function, mfcc gives the mel frequency ceptral coefficients. 
+
+#flim defines frequncy limits and takes a vector with two values -- c(lower limit, upperlimit) in kHz. e.g. c(2, 6)
+#scaled is set to FALSE by default, but most often will probably want to be set to TRUE to scale the features
+
+#Be sure to assign it to an object when calling. 
 extractFeatures <- function(data, flim = NULL, amp.data = TRUE, zcr.data = TRUE, acoustat.data = TRUE, mfcc = TRUE, scaled = FALSE) {
   
   full_data <- data.table()
@@ -163,7 +176,8 @@ extractFeatures <- function(data, flim = NULL, amp.data = TRUE, zcr.data = TRUE,
 #########################
 
 
-## This function enables the raw extraction of a full audio file. This does it in 3-second chunks to match with BirdNET
+## This function enables the raw extraction of a full audio file. This does it in 3-second chunks to match with BirdNET, but the temp.length
+## can be changed to match a classifier created with a different sized timewindow (using verify_results in template mode)
 
 totalExtract <- function(filepath, flim = NULL, amp.data = TRUE, zcr.data = TRUE, acoustat.data = TRUE, mfcc = TRUE, scaled = FALSE, temp.length = 3) {
   fullwave <- readWave(filepath)          
@@ -312,156 +326,59 @@ totalExtract <- function(filepath, flim = NULL, amp.data = TRUE, zcr.data = TRUE
 }
 
 
-###########################
+##################
 
-## This is a modified version of my 'verify' function, which allows for template creation. 
-## In the end, one main function with all funcitonality should be decided upon
-verify.results.template <- function (x, species = "all", conf = 0, temp.length = 'none') {
+#Takes a filepath to a wav file, breaks it into temp.length sized chunks and extracts specified features in order to be then analyzed my 
+# a classifier that used the same temp.length and features when it was created. I would lik to find a way to store temp.lengths and features
+# in the model object to not have to remember or keep records elsewhere. 
+
+
+predict_format <- function (model, file.path, flim = NULL, amp.data = TRUE, zcr.data = TRUE, acoustat.data = TRUE, mfcc = TRUE, scaled = TRUE, temp.length = 3) {
   
-  if(species == "all") {
+  results_df <- data.table()
+  features_df <- totalExtract(filepath = file.path, flim = flim, amp.data = amp.data, zcr.data = zcr.data, acoustat.data = acoustat.data, mfcc = mfcc, scaled = scaled, temp.length = temp.length)
+  
+  if (class(model) == 'train') {
+    prediction_df <- predict(model, features_df, type = 'prob')
+    setDT(prediction_df)
+    prediction_df[,start := seq(0, nrow(prediction_df) * temp.length - 1, temp.length)]
+    prediction_df[,end := start + temp.length]
+    prediction_df[,filepath := file.path]
+    prediction_df[,confidence := y]
     
+  } else {
+    prediction_df <- predict(model, features_df, type = 'raw')
+    setDT(prediction_df)
+    prediction_df[,start := seq(0, nrow(prediction_df) * temp.length - 1, temp.length)]
+    prediction_df[,end := start + temp.length]
+    prediction_df[,filepath := file.path]
+    prediction_df[,confidence := y]
   }
   
-  if(!species == "all") {
-    x <-  filter(x, common_name == species)
+  return(prediction_df)
+  
+}
+
+
+### predict results using a model and format them with timestamps, filepaths, etc.
+
+predict_results <- function(model, features_df, temp.length) {
+  
+  if (class(model) == 'train') {
+    prediction_df <- predict(model, features_df, type = 'prob')
+    setDT(prediction_df)
+    prediction_df[,start := seq(0, nrow(prediction_df) * temp.length - 1, temp.length)]
+    prediction_df[,end := start + temp.length]
+    prediction_df[,filepath := features_df[,filepath]]
     
+  } else {
+    prediction_df <- predict(model, features_df, type = 'raw')
+    setDT(prediction_df)
+    prediction_df[,start := seq(0, nrow(prediction_df) * temp.length - 1, temp.length)]
+    prediction_df[,end := start + temp.length]
+    prediction_df[,filepath := features_df[,filepath]]
   }
-  x <- filter(x, confidence > conf)
   
-  template_DT <- data.table()
-  verifs <- c()
-  verif.options <- c("y", "n", "r", "q", "s")
-  all.options <- c("y", "n", "r", "q", "p", "s", "w", "a", "t")
+  return(prediction_df)
   
-  if(!"verification" %in% names(x)){
-    x <- mutate(x, verification = NA)
-  }
-  
-  if(!"notes" %in% names(x)){
-    x<- mutate(x, notes = NA)
-  }
-  
-  
-  for (i in 1:nrow(x)) {
-    if(!is.na(x$verification[i])){
-      cat(paste("\n Verification for", basename(x$filepath[i]), "at", x$start[i], "seconds already exists. Moving onto next detection...\n"))
-      x$verification[i] <- x$verification[i]
-      next}
-    
-    
-    repeat{
-      
-      wave.obj <- readWave(x$filepath[i], from = x$start[i], to = x$end[i], units = 'seconds')
-      #spectro( wave = wave.obj )
-      viewSpec(x$filepath[i], start.time = x$start[i]-1, page.length = 5, units = 'seconds'  )
-      cat(paste("\n Showing detection", i, "out of", nrow(x), "from", basename(x$filepath[i]), "at", x$start[i], "seconds. Confidence:", x$confidence[i], "\n"))
-      
-      cat(paste( "Enter \n 'y' for yes,\n",  
-                 "'n' for no,\n",
-                 "'r' for review,\n",
-                 "'p' to play audio segment,\n", 
-                 "'w' to write segment as wav file to working directory,\n",
-                 "'s' to skip to next segment (and log as NA)",
-                 "'a' to add a note \n",
-                 "'q' for quit."))
-      
-      answer <- readline( prompt = paste0(paste("Is this a(n)", x$common_name[i]), "?")) 
-      
-      
-      if(answer %in% verif.options) break
-      
-      if(answer == "p") {
-        tempwave <- readWave(x$filepath[i], from = x$start[i] - 1, to = x$end[i] + 1, units = "seconds")
-        play(tempwave)
-      }
-      
-      if(answer == "w") {
-        filename <- paste0(paste(gsub(pattern = ".WAV", "", basename(x$filepath[i])), x$start[i], sep = "_"), ".WAV")
-        tempwave <<- readWave(x$filepath[i], from = x$start[i] - 1, to = x$end[i] + 1, units = "seconds")
-        writeWave(tempwave, filename)
-        cat("\n Writing wav file to working directory...")
-      }
-      
-      if(answer == "a") {
-        
-        note <- readline(prompt = "Add note here: ")
-        x$notes[i] <- note
-      }
-      
-      if(answer == "t") {
-        repeat {
-          wave.obj.2 <- readWave(x$filepath[i], from = x$start[i] - 1, to = x$end[i] + 1, units = 'seconds')
-          tempSpec <- spectro(wave.obj.2, fastdisp = TRUE)
-          t.bins <- tempSpec$time
-          n.t.bins <- length(t.bins)
-          which.t.bins <- 1:n.t.bins
-          which.frq.bins <- which(tempSpec$freq >= 0)
-          frq.bins <- tempSpec$freq
-          amp <- round(tempSpec$amp[which.frq.bins, ], 2)
-          n.frq.bins <- length(frq.bins)
-          ref.matrix <- matrix(0, nrow = n.frq.bins, ncol = n.t.bins)
-          
-          
-          if (temp.length == 'none') {
-          t.value <- as.numeric(readline("How many seconds long would you like the templates to be?"))
-          }else {
-            t.value <- temp.length
-          }
-          # f.min <- as.numeric(readline("What would you like the minimum frequency to be in Hz?"))
-          # f.max <- as.numeric(readline("What would you like the maximum frequency to be in Hz?"))
-          cat("Click the plot where you would like to center this template")
-          ctr.pt <- locator(n = 1)
-          
-          temp.DT <- data.table(filepath = x[i, filepath], 
-                                common_name = x[i, common_name], 
-                                start = (x[i, start] -1) + ctr.pt$x - (t.value/2), 
-                                end = (x[i, start] -1) + ctr.pt$x +(t.value/2),
-                                center.freq = ctr.pt$y
-                                # frq.min = f.min, 
-                                # frq.max = f.max)
-          )
-          template_DT <-  rbind(template_DT, temp.DT)
-          
-          # image(ref.matrix, 
-          #     xlim = c(ctr.pt$x - (.5*t.value), ctr.pt$x + (.5*t.value)),
-          #   ylim = c(f.min, f.max),
-          #   col = 'orange',
-          #   add = TRUE)
-          {break}
-        }
-        dev.off()
-      }
-      
-      
-      if(!answer %in% all.options){
-        cat("\n Response not recognized, please input correct response...\n")
-      }
-      
-    }
-    
-    if(answer %in% c("y", "n", "r")) {
-      cat("\n Adding result to verification data...\n ")
-      x$verification[i] <- answer
-    }
-    
-    if(answer == "s") {
-      x$verification[i] <- NA
-      cat("Skipping to next detection...")
-    }
-    
-    if(answer == "q") {
-      
-      x$verification[i:nrow(x)] <- x$verification[i:nrow(x)]
-      template_DT <<-template_DT
-      break}
-    
-  }
-  saveask <- readline(prompt = "Would you like to save results as a csv file? \n Input 'y' for yes:")
-  if(saveask == "y") {
-    fname <- readline(prompt = "What would you like to name the file?")
-    template_DT <<- template_DT
-    write.csv(x, paste0(fname, ".csv"), row.names = FALSE)
-  }
-  return(x)
-  
-} 
+}
