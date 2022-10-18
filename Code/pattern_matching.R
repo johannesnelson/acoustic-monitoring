@@ -7,8 +7,8 @@ batchPatternMatch <- function (dir, temp, results = 'both') {
   
   file.list <- list.files(dir, pattern = ".wav", ignore.case = TRUE)
   file.list <- paste(dir, file.list, sep = '\\')
-  all.detections <- data.frame()
-  all.peaks <- data.frame()
+  all.detections <- data.table()
+  all.peaks <- data.table()
   
   for (x in 1:length(file.list)) {
     scores <- corMatch(survey = file.list[x], templates = temp, show.prog = TRUE)
@@ -16,12 +16,15 @@ batchPatternMatch <- function (dir, temp, results = 'both') {
     filepath.peaks <- rep(file.list[x], times = nrow(peaks.obj@peaks[[1]]))
     temp.peaks <- peaks.obj@peaks[[1]]
     temp.peaks <- cbind(filepath.peaks, temp.peaks)
+    setDT(temp.peaks)
+    temp.peaks[,':='(start = time, end = time + 3, confidence = score)]
     all.peaks <- rbind(all.peaks, temp.peaks)
     
     detections <- getDetections(peaks.obj)
     filepath <- rep(file.list[x], times = nrow(detections))
     detections <- cbind(filepath, detections)
-    detections <- mutate(detections, start = time, end = time + 3)
+    setDT(detections)
+    detections[,':='(start = time, end = time + 3, confidence = score)]
     all.detections <- rbind(all.detections, detections)
     
   }
