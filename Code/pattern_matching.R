@@ -2,14 +2,21 @@
 ### that will also work with the verify_results function in results_verification.R
 
 
-##### Testing with also keeping peaks frame
-batchPatternMatch <- function (dir, temp, results = 'both') {
+# Testing with also keeping peaks frame. 'temp' is a monitoR object of the class corTemplateList. This should be read into your environment. 
+# score.cutoff will allow you to set the score cutoff for the template prior to processing. This is helpful if you will look only at detections.
+# results argument lets you specify if you want the peaks data.table or the detections data.table. Peaks is more informative and allows you to filter
+# all peaks by score (effectively creating detections anyway). Detections will only show peaks that are above the cutoff.
+
+batchPatternMatch <- function (dir, temp, score.cutoff = 'default', results = 'both') {
   
   file.list <- list.files(dir, pattern = ".wav", ignore.case = TRUE)
   file.list <- paste(dir, file.list, sep = '\\')
   all.detections <- data.table()
   all.peaks <- data.table()
   
+  if (!score.cutoff == 'default') {
+    templateCutoff(temp) <- c(default = score.cutoff)
+  }
   for (x in 1:length(file.list)) {
     scores <- corMatch(survey = file.list[x], templates = temp, show.prog = TRUE)
     peaks.obj <- findPeaks(scores)
