@@ -48,7 +48,7 @@ gather_write <- function(directory, filename) {
 # to the audio directory, start and end times, it should work. If doing multiple species detections, defining a common_name column with
 # species names will be necessary. 
 
-verify_results <- function (data, species = "all", conf = 0, temp.length = 'none') {
+verify_results <- function (data, species = "all", conf = 0, temp.length = 'none', template.mode = FALSE) {
   
   setDT(data)
   if(!species == "all") {
@@ -61,6 +61,9 @@ verify_results <- function (data, species = "all", conf = 0, temp.length = 'none
   verif.options <- c("y", "n", "r", "q", "s")
   all.options <- c("y", "n", "r", "q", "p", "s", "w", "a", "t")
   
+ if (template.mode == TRUE) {
+   template_DT <- data.table()
+ }
   if(!"verification" %in% names(data)){   #Adds verification column
     data[,verification := NA]
   }
