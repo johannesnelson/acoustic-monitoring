@@ -1,41 +1,232 @@
-#### BirdNET data manipulation functions
+#### These functions can help handle, visualize, and validate results from BirdNET, but will work with any
+#### results formatted with the following columns:
+
+####        -filepath: character string path to audio file
+####        -start: start time in seconds of detection
+####        -end: end time in seconds from detection
+
 library(NSNSDAcoustics)
 library(tidyverse)
 library(RSQLite)
 library(AMMonitor)
 library(seewave)
-
-data.fp <- "D:/Capstone/Audio_data"
-results.fp <- "D:/Capstone/BirdNET_results"
-
-db.path <- 'database/resultsDB.sqlite'
-
-bndb <- RSQLite::dbConnect(drv = dbDriver('SQLite'), dbname = db.path)
+library(data.table)
 
 
-# This gathers all and writes it to a new, full csv file in the same directory
 
-gather.all <- function(directory, filename) {
+# This will name all files in a directory (usually SD card) according to the arguments of locID and eqID 
+# so that "locationID_deviceID_YYYYMMDD_HHMMSS.WAV" becomes the naming convention. This will help a great
+# deal with organization and later analysis, since each filename is encoded with a lot of crucial information
+
+
+nameFiles <- function(directory, new_directory, locID, eqID) {
+  
+  file.vector <- list.files(directory) 
+  current.dir <- getwd()
+  setwd(directory)
+  for (oldname in file.vector) {
+    file.rename(from = oldname, to = paste(locID, eqID, basename(oldname), sep = '_'))
+  }
+  new.file.vector <- list.files()
+  file.copy(new.file.vector, new_directory)  #note, the original files are not deleted so that you can verify successful copying before wiping sd card clean
+  setwd(current.dir)
+}
+
+
+# This just adds the 'write' step to the NDSA acoustics function which gathers all BirdNET csv's into a single data.table
+
+gather_write <- function(directory, filename) {
   all.results <- birdnet_gather(results.directory = directory, formatted = FALSE)
   write.csv(all.results, paste(directory, filename, sep = '/'), row.names = FALSE)
   return(all.results)
 }
 
 
+# This function allows easy visual scanning of results with options to play, save wave files, write notes, etc. Be sure either to 
+# assign the result to an object or to choose the save as csv option at the end. If you 'esc' mid verification, you will lose
+# your progress. It is the primary tool I use to go through detection results. As long as the dataframe has filepaths that correspond
+# to the audio directory, start and end times, it should work. If doing multiple species detections, defining a common_name column with
+# species names will be necessary. 
 
-# This preps the data frame for input into the function birdnet_plot()
-
-plot.prep <- function(x) {
-  mutate(x, timezone = "America/New_York",
-         verify = NA,
-         recordingID = basename(filepath))
+verify_results <- function (data, species = "all", conf = 0, temp.length = 'none') {
   
+  setDT(data)
+  if(!species == "all") {
+    data <- data[common_name == species,]
+    
+  }
+  data <- data[confidence >= conf,]
+  
+  verifs <- c()
+  verif.options <- c("y", "n", "r", "q", "s")
+  all.options <- c("y", "n", "r", "q", "p", "s", "w", "a", "t")
+  
+  if(!"verification" %in% names(data)){   #Adds verification column
+    data[,verification := NA]
+  }
+  
+  if(!"notes" %in% names(data)){         #Adds notes column
+    data[,notes := NA]
+  }
+  
+  if(!"confidence" %in% names(data)){         #Adds confidence column with 0s. Only really relevant if using non-birdNET detections (e.g. monitoR, or a specific ML model)
+    data[,confidence := 0]
+  }
+  
+  # Skip over observations where verification is already defined
+  
+  for (i in 1:nrow(data)) {
+    if(!is.na(data$verification[i])){
+      cat(paste("\n Verification for", basename(data$filepath[i]), "at", data$start[i], "seconds already exists. Moving onto next detection...\n"))
+      data$verification[i] <- data$verification[i]
+      next}
+    
+    # Begin main repeat loop where spectrograms are shown with options for user to input into console
+    
+    repeat{
+      
+      wave.obj <- readWave(data$filepath[i], from = data$start[i], to = data$end[i], units = 'seconds')
+      #spectro( wave = wave.obj )
+      viewSpec(data$filepath[i], start.time = data$start[i]-1, page.length = 5, units = 'seconds'  )
+      cat(paste("\n Showing detection", i, "out of", nrow(data), "from", basename(data$filepath[i]), "at", data$start[i], "seconds. Confidence:", data$confidence[i], "\n"))
+      
+      cat(paste( "Enter \n 'y' for yes,\n",  
+                 "'n' for no,\n",
+                 "'r' for review,\n",
+                 "'p' to play audio segment,\n", 
+                 "'w' to write segment as wav file to working directory,\n",
+                 "'s' to skip to next segment (and log as NA)",
+                 "'a' to add a note \n",
+                 "'q' for quit."))
+      
+      answer <- readline( prompt = paste0(paste("Is this a(n)", data$common_name[i]), "?")) 
+      
+      
+      if(answer %in% verif.options) break
+      
+      # Option to play sound
+      if(answer == "p") {
+        tempwave <- readWave(data$filepath[i], from = data$start[i] - 1, to = data$end[i] + 1, units = "seconds")
+        play(tempwave)
+      }
+      # Option to write sound to wav file in working directory
+      if(answer == "w") {
+        filename <- paste0(paste(gsub(pattern = ".WAV", "", basename(data$filepath[i])), data$start[i], sep = "_"), ".WAV")
+        tempwave <- readWave(data$filepath[i], from = data$start[i] - 1, to = data$end[i] + 1, units = "seconds")
+        writeWave(tempwave, filename)
+        cat("\n Writing wav file to working directory...")
+      }
+      
+      # Option to add a note in the notes column
+      if(answer == "a") {
+        
+        note <- readline(prompt = "Add note here: ")
+        data$notes[i] <- note
+      }
+      
+      # This 'template mode' section is still in development. It allows you to click on the center of a detection and specify a temp.length. 
+      # When quitting out of function, it will save a template_DT which is effectively a new set of detections, but with
+      # a smaller time window (end - start) will be equal to temp.length and centered on the actual detection. The reason
+      # for this is when extracting features to fit ML models, the 3 seconds birdNET window is often too large and has 
+      # a lot of unwanted information. This function should allow you to use high confidnce birdNET detections to create
+      # a stronger training set for ML purposes. As it is, it is finnicky and the visualization/locator() selection 
+      # piece could be refined. 
+      
+      if(answer == "t") {
+        repeat {
+          wave.obj.2 <- readWave(data$filepath[i], from = data$start[i] - 1, to = data$end[i] + 1, units = 'seconds')
+          tempSpec <- spectro(wave.obj.2, fastdisp = TRUE)
+          t.bins <- tempSpec$time
+          n.t.bins <- length(t.bins)
+          which.t.bins <- 1:n.t.bins
+          which.frq.bins <- which(tempSpec$freq >= 0)
+          frq.bins <- tempSpec$freq
+          amp <- round(tempSpec$amp[which.frq.bins, ], 2)
+          n.frq.bins <- length(frq.bins)
+          ref.matrix <- matrix(0, nrow = n.frq.bins, ncol = n.t.bins)
+          
+          
+          if (temp.length == 'none') {
+            t.value <- as.numeric(readline("How many seconds long would you like the templates to be?"))
+          }else {
+            t.value <- temp.length
+          }
+          # f.min <- as.numeric(readline("What would you like the minimum frequency to be in Hz?"))
+          # f.max <- as.numeric(readline("What would you like the maximum frequency to be in Hz?"))
+          cat("Click the plot where you would like to center this template")
+          ctr.pt <- locator(n = 1)
+          
+          temp.DT <- data.table(filepath = data[i, filepath], 
+                                common_name = data[i, common_name], 
+                                start = (data[i, start] -1) + ctr.pt$x - (t.value/2), 
+                                end = (data[i, start] -1) + ctr.pt$x +(t.value/2),
+                                center.freq = ctr.pt$y
+                                # frq.min = f.min, 
+                                # frq.max = f.max)
+          )
+          template_DT <-  rbind(template_DT, temp.DT)
+          
+          # image(ref.matrix, 
+          #     xlim = c(ctr.pt$x - (.5*t.value), ctr.pt$x + (.5*t.value)),
+          #   ylim = c(f.min, f.max),
+          #   col = 'orange',
+          #   add = TRUE)
+          {break}
+        }
+        dev.off()
+      }
+      
+      
+      if(!answer %in% all.options){
+        cat("\n Response not recognized, please input correct response...\n")
+      }
+      
+    }
+    
+    # add verification character to verification column
+    if(answer %in% c("y", "n", "r")) {
+      cat("\n Adding result to verification data...\n ")
+      data$verification[i] <- answer
+    }
+    # skip observation (leave as NA)
+    if(answer == "s") {
+      data$verification[i] <- NA
+      cat("Skipping to next detection...")
+    }
+    
+    # quitting will lead to csv saving options
+    if(answer == "q") {
+      
+      data$verification[i:nrow(data)] <- data$verification[i:nrow(data)]
+      template_DT <<-template_DT
+      break}
+    
+  }
+  saveask <- readline(prompt = "Would you like to save results as a csv file? \n Input 'y' for yes:")
+  if(saveask == "y") {
+    fname <- readline(prompt = "What would you like to name the file?")
+    
+    write.csv(data, paste0(fname, ".csv"), row.names = FALSE)
+  }
+  return(data)
+  
+} 
+
+
+
+# The NSNSDA function birdnet_plot() requires certain columns to exist. This will create them. 
+# User defines timezone in tz.
+
+plot_prep <- function(data, tz) {
+  data[, ':=' (timezone = tz, verify = NA, recordingID = basename(filepath))]
+  return(data)
 }
 
 
-### Functions for adding columns that allow exploration by location, date, time
+# Functions for adding columns for location, date, time. This assumes the filename convention "locationID_deviceID_YYYYMMDD_HHMMSS.WAV"
+# see function nameFiles for an easy way to batch name all audio files as you download them of SDcards. These take along time to run
+# on large data.tables, but you only need to run them once and save to csv or SQLite table, etc.
 
-# Add locationID based on locationID tag in filename
 add.locationID <- function(x) {
   
   newframe <- mutate(x, locationIDvector = strsplit(basename(x$filepath), split = '_'))
@@ -71,7 +262,7 @@ add.date <- function(x) {
   
 }
 
-# Add time based on time info in filename (needs to be made better with a lubridate style function)
+# Add time based on time info in filename (time gets converted to character here)
 add.time <- function(x) {
   
   newframe <- mutate(x, locationIDvector = strsplit(basename(x$filepath), split = '_'))
@@ -87,17 +278,14 @@ add.time <- function(x) {
 }
 
 
-######## Filtering made easier 
+######## Some summarizing functions
 
-filter.species <- function(data, species){
-  filter(data, common_name == species)
-}
+# This function creates a table of all species detected, the number of detections, the max, min, mean, and sd of the confidence value,
+# as well as a 'high confidence mean' which takes n observations (where n is defined by the numobs argument) with the greatest confidence
+# score for each species and gives the mean. Since there are often so many low confidence detections, this pulls the mean confidence
+# way down and doesn't always give an accurate idea of probability of presence just at a glance. 
 
-filter.confidence <- function(data, minconf){
-  filter(data, confidence >= minconf)
-}
-
-species.count <- function(data, num.obs = 20){
+species_count <- function(data, num.obs = 20){
   setDT(data)
   setorder(data, common_name, -confidence)
   specvec <- unique(data[,common_name])
@@ -126,7 +314,9 @@ species.count <- function(data, num.obs = 20){
 }
 
 
-### NEEDS REVIEW NOT WORKING AS EXPECTED
+# This filters the data to show only observations where the mean confidence of the highest confidence values for a certain number (num.obs)
+# of species detections
+
 high.mean.conf.filter <- function(data, cutoff, num.obs = 20){
   setDT(data)
   setorder(data, common_name, -confidence)
@@ -142,7 +332,7 @@ high.mean.conf.filter <- function(data, cutoff, num.obs = 20){
   return(data)
 }
 
-#### Write BirdNET detections to ordered wave files that should correspond to spectrogram order if you want to visually scan as well. This expect
+#### Write BirdNET detections to ordered wave files that should correspond to spectrogram order (created with ordered_plot) if you want to visually scan as well.
 
 makeWaves <- function(x, dir) {
   dir.create(dir, recursive = TRUE)
@@ -155,8 +345,8 @@ makeWaves <- function(x, dir) {
   
 }
 
-### This is only a slightly modified birdnet_gather that removes the key() arugment for ordering purposes
-ordered.plot <- function (data, audio.directory, title, frq.lim = c(0, 12), new.window = TRUE, 
+### This is only a slightly modified birdnet_gather that removes the key() arugment for ordering/ scanning purposes
+ordered_plot <- function (data, audio.directory, title, frq.lim = c(0, 12), new.window = TRUE, 
                           spec.col = monitoR::gray.3(), box = TRUE, box.lwd = 1, box.col = "black", 
                           title.size = 1) 
 {
@@ -226,33 +416,7 @@ ordered.plot <- function (data, audio.directory, title, frq.lim = c(0, 12), new.
 }
 
 
-##### This will create subset dfs of all the rails in a formatted df
-
-subset.rails.conf <- function(x) {
-  
-  VIRA <<- filter.species(x, "Virginia Rail")
-  KIRA <<- filter.species(x, "King Rail")
-  BLRA <<- filter.species(x, "Black Rail")
-  SORA <<- filter.species(x, "Sora")
-  
-  VIRA <<- VIRA[order(-VIRA$confidence),]
-  KIRA <<- KIRA[order(-KIRA$confidence),]
-  BLRA <<- BLRA[order(-BLRA$confidence),]
-  SORA <<- SORA[order(-SORA$confidence),]
-}
-
-subset.rails <- function(x) {
-  
-  VIRA <<- filter.species(x, "Virginia Rail")
-  KIRA <<- filter.species(x, "King Rail")
-  BLRA <<- filter.species(x, "Black Rail")
-  SORA <<- filter.species(x, "Sora")
-  
-}
-
-####### Full filter function
-
-#### Filtering BN results
+# Simple function that allows you to filter all results by a confidence threshold and a count cutoff. Saves some time.
 filter.results <- function(dataframe, conf.level, count.cutoff) {
   
   dataframe %>% 
@@ -263,350 +427,39 @@ filter.results <- function(dataframe, conf.level, count.cutoff) {
 
 
 
-### Awesome verification function
 
 
+# Function to pull out, visualize, and listen to a detection by row index number time_buffer adds a pad of seconds on either side, start and end
+# buffers scooch the window one way or the other. Easy for quick visualizations/listens and also easier to call readWAve without having to specify
+# start and end each time. 
 
-
-
-verify.results.simple <- function (x) {
-  verifs <- c()
-  verif.options <- c("y", "n", "r", "q", "s")
-  all.options <- c("y", "n", "r", "q", "p", "s", "w", "a")
+pullWave <- function (data, det_num, time.buffer = 0, start_buffer = 0, end_buffer = 0, listen = TRUE) {
   
-  if(!"verification" %in% names(x)){
-    x <- mutate(x, verification = NA)
-  }
-  
-  if(!"notes" %in% names(x)){
-    x<- mutate(x, notes = NA)
-  }
-  
-  
-  for (i in 1:nrow(x)) {
-    if(!is.na(x$verification[i])){
-      cat(paste("\n Verification for", basename(x$filepath[i]), "at", x$start[i], "seconds already exists. Moving onto next detection...\n"))
-      verifs <- append(verifs, x$verification[i])
-      next}
-    
-    
-    repeat{
-      
-      wave.obj <- readWave(x$filepath[i], from = x$start[i], to = x$end[i], units = 'seconds')
-      #spectro( wave = wave.obj )
-      viewSpec(x$filepath[i], start.time = x$start[i]-1, page.length = 5, units = 'seconds'  )
-      cat(paste("\n Showing detection", i, "out of", nrow(x), "from", basename(x$filepath[i]), "at", x$start[i], "seconds. Confidence:", x$confidence[i], "\n"))
-      
-      cat(paste( "Enter \n 'y' for yes,\n",  
-                 "'n' for no,\n",
-                 "'r' for review,\n",
-                 "'p' to play audio segment,\n", 
-                 "'w' to write segment as wav file to working directory,\n",
-                 "'s' to skip to next segment (and log as NA)",
-                 "'a' to add a note \n",
-                 "'q' for quit."))
-      
-      answer <- readline( prompt = paste0(paste("Is this a(n)", x$common_name[i]), "?")) 
-      
-      
-      if(answer %in% verif.options) break
-      
-      if(answer == "p") {
-        tempwave <- readWave(x$filepath[i], from = x$start[i] - 1, to = x$end[i] + 1, units = "seconds")
-        play(tempwave)
-      }
-      
-      if(answer == "w") {
-        filename <- paste0(paste(gsub(pattern = ".WAV", "", basename(x$filepath[i])), x$start[i], sep = "_"), ".WAV")
-        tempwave <<- readWave(x$filepath[i], from = x$start[i] - 1, to = x$end[i] + 1, units = "seconds")
-        writeWave(tempwave, filename)
-        cat("\n Writing wav file to working directory...")
-      }
-      
-      if(answer == "a") {
-        
-        note <- readline(prompt = "Add note here: ")
-        x$notes[i] <- note
-      }
-      
-      
-      if(!answer %in% all.options){
-        cat("\n Response not recognized, please input correct response...\n")
-      }
-      
-    }
-    
-    if(answer %in% c("y", "n", "r")) {
-      cat("\n Adding result to verification data...\n ")
-      verifs <- append(verifs, answer)
-    }
-    
-    if(answer == "s") {
-      verifs <- (append(verifs, NA))
-      cat("Skipping to next detection...")
-    }
-    
-    if(answer == "q") {
-      
-      verifs <- append(verifs, x$verification[i:nrow(x)])
-      break}
-    
-  }
-  
-  
-  mutate(x, verification = verifs)
-} 
-
-
-
-##### This option adds more functionality 
-
-
-verify.results.species <- function (x, species = "all", conf = 0) {
-  
-  if(species == "all") {
-    
-  }
-  
-  if(!species == "all") {
-    x <-  filter(x, common_name == species)
-    
-  }
-  x <- filter(x, confidence > conf)
-  
-  verifs <- c()
-  verif.options <- c("y", "n", "r", "q", "s")
-  all.options <- c("y", "n", "r", "q", "p", "s", "w", "a")
-  
-  if(!"verification" %in% names(x)){
-    x <- mutate(x, verification = NA)
-  }
-  
-  if(!"notes" %in% names(x)){
-    x<- mutate(x, notes = NA)
-  }
-  
-  
-  for (i in 1:nrow(x)) {
-    if(!is.na(x$verification[i])){
-      cat(paste("\n Verification for", basename(x$filepath[i]), "at", x$start[i], "seconds already exists. Moving onto next detection...\n"))
-      x$verification[i] <- x$verification[i]
-      next}
-    
-    
-    repeat{
-      
-      wave.obj <- readWave(x$filepath[i], from = x$start[i], to = x$end[i], units = 'seconds')
-      #spectro( wave = wave.obj )
-      viewSpec(x$filepath[i], start.time = x$start[i]-1, page.length = 5, units = 'seconds'  )
-      cat(paste("\n Showing detection", i, "out of", nrow(x), "from", basename(x$filepath[i]), "at", x$start[i], "seconds. Confidence:", x$confidence[i], "\n"))
-      
-      cat(paste( "Enter \n 'y' for yes,\n",  
-                 "'n' for no,\n",
-                 "'r' for review,\n",
-                 "'p' to play audio segment,\n", 
-                 "'w' to write segment as wav file to working directory,\n",
-                 "'s' to skip to next segment (and log as NA)",
-                 "'a' to add a note \n",
-                 "'q' for quit."))
-      
-      answer <- readline( prompt = paste0(paste("Is this a(n)", x$common_name[i]), "?")) 
-      
-      
-      if(answer %in% verif.options) break
-      
-      if(answer == "p") {
-        tempwave <- readWave(x$filepath[i], from = x$start[i] - 1, to = x$end[i] + 1, units = "seconds")
-        play(tempwave)
-      }
-      
-      if(answer == "w") {
-        filename <- paste0(paste(gsub(pattern = ".WAV", "", basename(x$filepath[i])), x$start[i], sep = "_"), ".WAV")
-        tempwave <<- readWave(x$filepath[i], from = x$start[i] - 1, to = x$end[i] + 1, units = "seconds")
-        writeWave(tempwave, filename)
-        cat("\n Writing wav file to working directory...")
-      }
-      
-      if(answer == "a") {
-        
-        note <- readline(prompt = "Add note here: ")
-        x$notes[i] <- note
-      }
-      
-      
-      if(!answer %in% all.options){
-        cat("\n Response not recognized, please input correct response...\n")
-      }
-      
-    }
-    
-    if(answer %in% c("y", "n", "r")) {
-      cat("\n Adding result to verification data...\n ")
-      x$verification[i] <- answer
-    }
-    
-    if(answer == "s") {
-      x$verification[i] <- NA
-      cat("Skipping to next detection...")
-    }
-    
-    if(answer == "q") {
-      
-      x$verification[i:nrow(x)] <- x$verification[i:nrow(x)]
-      break}
-    
-  }
-  saveask <- readline(prompt = "Would you like to save results as a csv file? \n Input 'y' for yes:")
-  if(saveask == "y") {
-    fname <- readline(prompt = "What would you like to name the file?")
-    
-    write.csv(x, paste0(fname, ".csv"), row.names = FALSE)
-  }
-  return(x)
-  
-} 
-
-
-######################## For quick verifs of full dataset by count
-
-verify.results.count <- function (df, spec.count = NULL) {
-  
-  setDT(df)
-  setkey(df, common_name)
-  spec.list <- unique(df[,common_name])
-  spec.no <- length(spec.list)
-  
-  final_dt <- data.table()
-  for(i in 1:length(spec.list)) {
-    spec.subset <- df[common_name == spec.list[i],]
-    if(nrow(spec.subset) >= spec.count){
-      spec.subset <- spec.subset[sample(1:nrow(spec.subset), spec.count), ]
-    } 
-    final_dt <- rbind(final_dt, spec.subset)
-  }
-  df <- final_dt
-  verifs <- c()
-  verif.options <- c("y", "n", "r", "q", "s")
-  all.options <- c("y", "n", "r", "q", "p", "s", "w", "a")
-  
-  if(!"verification" %in% names(df)){
-    df[, verification := NA]
-  }
-  
-  if(!"notes" %in% names(df)){
-    df[,notes := NA]
-  }
-  
-  
-  for (i in 1:nrow(final_dt)) {
-    if(!is.na(df$verification[i])){
-      cat(paste("\n Verification for", basename(df$filepath[i]), "at", df$start[i], "seconds already exists. Moving onto next detection...\n"))
-      df$verification[i] <- df$verification[i]
-      next}
-    
-    
-    repeat{
-      
-      wave.obj <- readWave(df$filepath[i], from = df$start[i], to = df$end[i], units = 'seconds')
-      #spectro( wave = wave.obj )
-      viewSpec(df$filepath[i], start.time = df$start[i]-1, page.length = 5, units = 'seconds'  )
-      cat(paste("\n Showing detection", i, "out of", nrow(df), "from", basename(df$filepath[i]), "at", df$start[i], "seconds. Confidence:", df$confidence[i], "\n"))
-      
-      cat(paste( "Enter \n 'y' for yes,\n",  
-                 "'n' for no,\n",
-                 "'r' for review,\n",
-                 "'p' to play audio segment,\n", 
-                 "'w' to write segment as wav file to working directory,\n",
-                 "'s' to skip to next segment (and log as NA)",
-                 "'a' to add a note \n",
-                 "'q' for quit."))
-      
-      answer <- readline( prompt = paste0(paste("Is this a(n)", df$common_name[i]), "?")) 
-      
-      
-      if(answer %in% verif.options) break
-      
-      if(answer == "p") {
-        tempwave <- readWave(df$filepath[i], from = df$start[i] - 1, to = df$end[i] + 1, units = "seconds")
-        play(tempwave)
-      }
-      
-      if(answer == "w") {
-        filename <- paste0(paste(gsub(pattern = ".WAV", "", basename(df$filepath[i])), df$start[i], sep = "_"), ".WAV")
-        tempwave <- readWave(df$filepath[i], from = df$start[i] - 1, to = df$end[i] + 1, units = "seconds")
-        writeWave(tempwave, filename)
-        cat("\n Writing wav file to working directory...")
-      }
-      
-      if(answer == "a") {
-        
-        note <- readline(prompt = "Add note here: ")
-        df$notes[i] <- note
-      }
-      
-     # if(answer == 'l') {
-        
-      #  i <- i - 1
-    #  }
-      
-      
-      if(!answer %in% all.options){
-        cat("\n Response not recognized, please input correct response...\n")
-      }
-      
-    }
-    
-    if(answer %in% c("y", "n", "r")) {
-      cat("\n Adding result to verification data...\n ")
-      df$verification[i] <- answer
-    }
-    
-    if(answer == "s") {
-      df$verification[i] <- NA
-      cat("Skipping to next detection...")
-    }
-    
-    if(answer == "q") {
-      
-      df$verification[i:nrow(df)] <- df$verification[i:nrow(df)]
-      break}
-    
-  }
-  saveask <- readline(prompt = "Would you like to save results as a csv file? \n Input 'y' for yes:")
-  if(saveask == "y") {
-    fname <- readline(prompt = "What would you like to name the file?")
-    
-    write.csv(df, paste0(fname, ".csv"), row.names = FALSE)
-  }
-  return(df)
-  
-} 
-
-
-
-
-#### Function to pull out, visualize, and listen to a detection by number -- taking args of datagrame and rownumber
-
-
-pullWave <- function (x, det_num, time.buffer = 0, start_buffer = 0, end_buffer = 0, listen = TRUE) {
-  
-  tempwave <- readWave(filename = x$filepath[det_num], 
-                       from = x$start[det_num] - (time.buffer + start_buffer), 
-                       to = x$end[det_num] + (time.buffer+ end_buffer), 
+  tempwave <- readWave(filename = data$filepath[det_num], 
+                       from = data$start[det_num] - (time.buffer + start_buffer), 
+                       to = data$end[det_num] + (time.buffer+ end_buffer), 
                        units = 'seconds')
   
-  viewSpec(clip = x$filepath[det_num],
-           start.time = x$start[det_num] - (time.buffer + start_buffer),
-           page.length = ((x$end[det_num] + (time.buffer + end_buffer) - (x$start[det_num] - (time.buffer + start_buffer)))),
+  viewSpec(clip = data$filepath[det_num],
+           start.time = data$start[det_num] - (time.buffer + start_buffer),
+           page.length = ((data$end[det_num] + (time.buffer + end_buffer) - (data$start[det_num] - (time.buffer + start_buffer)))),
            units = 'seconds')
-  cat("Birdnet confidence is", x$confidence[det_num])
+  cat("Birdnet confidence is", data$confidence[det_num])
   if (listen == TRUE){
     play(tempwave)}
   
   return(tempwave)
 }
 
-##### Good batch loading from a folder
+# This just modifies pullWave a bit to order the results by confidence so that you can see a 'prime' example. Your det_num in this case
+# will be ordinal, meaning 1 will pull the highest confidence example for that species. It is not necessary, but I have wanted to pull good examples
+# for visualizations in presentations enough times that it is worth including for me. 
+
+pullGoodWave <- function(data, species, det_num, start_buffer = 0, end_buffer = 0, time_buffer = 0 ) {
+  pullWave(data[common_name == species][order(-confidence)], det_num, start_buffer = start_buffer, end_buffer = end_buffer, time.buffer = time_buffer)
+}
+
+# I can't remember why I thought I needed this, but I am leaving it here until I do
 
 batch_load <- function (dir) {
   
@@ -619,315 +472,3 @@ batch_load <- function (dir) {
 
 
 
-#######################
-
-extractFeatures <- function(data, flim = NULL, amp.data = TRUE, zcr.data = TRUE, acoustat.data = TRUE, mfcc = TRUE, scaled = FALSE) {
-  
-  full_data <- data.table()
-  
-  amp_full_data <- data.table()
-  
-  if (amp.data == TRUE) {
-    for (x in 1:length(data$filepath)) {
-      
-      # Read in temporary wave object
-      temp.wave <- readWave(data$filepath[x], from = data$start[x], to = data$end[x], units = 'seconds' )
-      
-      # Create temporary spectrogram
-      temp.spec <- spectro(wave = temp.wave, flim = flim, plot = FALSE)
-      
-      # Extraction and preparation of taw amp data
-      temp.data <- as.vector(t(temp.spec$amp))
-      temp.data <- as.data.frame(t(temp.data))
-      amp_full_data <- rbind(amp_full_data, temp.data)
-      
-    }
-    
-    # add names to columns with amp.'x'
-    col_labels <- c()
-    for (i in 1:length(amp_full_data)) {
-      col_labels <- append(col_labels, paste("amp", i, sep = "."))
-    }
-    colnames(amp_full_data) <- col_labels
-    full_data <- cbind(full_data, amp_full_data)
-    
-  }
-  
-  
-  # extract zero crossing rate data
-  
-  if(zcr.data == TRUE) {
-    zcr_full_data <- data.table()
-    
-    for (x in 1:length(data$filepath)){
-      temp.wave <- readWave(data$filepath[x], from = data$start[x], to = data$end[x], units = 'seconds' )
-      
-      zcr.data <- zcr(temp.wave, plot = FALSE)
-      zcr.data <- as.data.table(zcr.data[,'zcr'])
-      zcr.data <- as.data.table(t(zcr.data))
-      zcr_full_data <- rbind(zcr_full_data, zcr.data)
-    }
-    
-    #name zcr cols
-    zcr_col_labels <- c()
-    for (i in 1:length(zcr_full_data)) {
-      zcr_col_labels <- append(zcr_col_labels, paste("zcr", i, sep = "."))
-    }
-    colnames(zcr_full_data) <- zcr_col_labels
-    
-    full_data <- cbind(full_data, zcr_full_data)
-    
-  }
-  
-  ## MFCC 
-  if(mfcc == TRUE) {
-    mfcc_full_data <- data.table()
-    
-    for (i in 1:length(data$filepath)) {
-      temp.wave <- readWave(data$filepath[i], from = data$start[i], to = data$end[i], units = 'seconds' )
-      mfcc_data <- melfcc(temp.wave)
-      mfcc_data <- as.vector(t(mfcc_data))
-      mfcc_data <- as.data.table(t(mfcc_data))
-      mfcc_full_data <- rbind(mfcc_full_data, mfcc_data)
-    }
-    mfcc_col_labels <- c()
-    for (i in 1:length(mfcc_full_data)) {
-      mfcc_col_labels <- append(mfcc_col_labels, paste('mfcc', i, sep = "."))
-    }
-    setnames(mfcc_full_data, old = colnames(mfcc_full_data), new = mfcc_col_labels)
-    full_data <- cbind(full_data, mfcc_full_data)
-  }
-  ### add acoustat extraction here
-  
-  if(acoustat.data == TRUE) {
-    aco_time_data <- data.table()
-    
-    for (x in 1:length(data$filepath)){
-      temp.wave <- readWave(data$filepath[x], from = data$start[x], to = data$end[x], units = 'seconds' )
-      
-      aco.data <- acoustat(temp.wave, flim = flim, plot = FALSE)
-      aco.time <- as.data.table(aco.data$time.contour[, 2])
-      aco.time <- as.data.table(t(aco.time))
-      aco_time_data <- rbind(aco_time_data, aco.time)
-    }
-    
-    #naming tc cols 
-    aco_col_labels <- c()
-    for (i in 1:length(aco_time_data)) {
-      aco_col_labels <- append(aco_col_labels, paste("tc", i, sep = "."))
-    }
-    
-    colnames(aco_time_data) <- aco_col_labels
-    
-    full_data <- cbind(full_data, aco_time_data)
-    
-    ### add acoustat extraction here
-    
-    aco_freq_data <- data.table()
-    
-    for (x in 1:length(data$filepath)){
-      temp.wave <- readWave(data$filepath[x], from = data$start[x], to = data$end[x], units = 'seconds' )
-      
-      aco.data <- acoustat(temp.wave, flim = flim, plot = FALSE)
-      aco.freq <- as.data.table(aco.data$freq.contour[, 2])
-      aco.freq <- as.data.table(t(aco.freq))
-      aco_freq_data <- rbind(aco_freq_data, aco.freq)
-    }
-    
-    #naming tc cols 
-    aco_freq_labels <- c()
-    for (i in 1:length(aco_freq_data)) {
-      aco_freq_labels <- append(aco_freq_labels, paste("fc", i, sep = "."))
-    }
-    
-    colnames(aco_freq_data) <- aco_freq_labels
-    
-    full_data <- cbind(full_data, aco_freq_data)
-    
-    ##### Final acoustat shit
-    aco_misc_data <- data.table()
-    
-    for (x in 1:length(data$filepath)){
-      temp.wave <- readWave(data$filepath[x], from = data$start[x], to = data$end[x], units = 'seconds' )
-      aco.data <- acoustat(temp.wave, flim = flim, plot = FALSE)
-      misc.data <- as.data.table(aco.data[3:length(aco.data)])
-      aco_misc_data <- rbind(aco_misc_data, misc.data)
-      
-    }
-    full_data <- cbind(full_data, aco_misc_data)
-    
-  }
-  #final column for verification results
-  verif.vector <- c()
-  
-  for (i in 1:length(data$verification)) {
-    verif.vector <- append(verif.vector, data$verification[i])
-  }
-  
-  full_data <- cbind(full_data, verif.vector)
-  
-  if (scaled == TRUE) {
-    
-    scale.cols <- colnames(full_data)
-    
-    scale.cols <- scale.cols[-length(scale.cols)]
-    full_data[, (scale.cols) := lapply(.SD, scale), .SDcols = scale.cols]
-  }
-  
-  return(full_data)
-}
-
-
-#########################
-# Raw extraction of full audio file
-totalExtract <- function(filepath, flim = NULL, amp.data = TRUE, zcr.data = TRUE, acoustat.data = TRUE, mfcc = TRUE, scaled = FALSE) {
-  fullwave <- readWave(filepath)          
-  wav.dur <- length(fullwave@left)/fullwave@samp.rate
-  wave.seq <- seq(0, wav.dur, 3)
-  full_data <- data.table()
-  
-  if (amp.data == TRUE) {
-    for (x in wave.seq[-length(wave.seq)]) {
-      temp.wave <- readWave(filepath, from = x, to = x + 3, units = 'seconds')
-      temp.spec <- spectro(wave = temp.wave, flim = flim, plot = FALSE)
-      
-      # Extraction and preparation of taw amp data
-      temp.data <- as.vector(t(temp.spec$amp))
-      temp.data <- as.data.table(t(temp.data))
-      full_data <- rbind(full_data, temp.data)
-      
-    }
-    
-    # add names to columns with amp.'x'
-    col_labels <- c()
-    for (i in 1:length(full_data)) {
-      col_labels <- append(col_labels, paste("amp", i, sep = "."))
-    }
-    colnames(full_data) <- col_labels
-    
-  }
-  ##zcr extraction begin here
-  if(zcr.data == TRUE) {
-    zcr_full_data <- data.table()
-    
-    for (x in wave.seq[-length(wave.seq)]) {
-      temp.wave <- readWave(filepath, from = x, to = x + 3, units = 'seconds')    
-      zcr.data <- zcr(temp.wave, plot = FALSE)
-      zcr.data <- as.data.table(zcr.data[,'zcr'])
-      zcr.data <- as.data.table(t(zcr.data))
-      zcr_full_data <- rbind(zcr_full_data, zcr.data)
-    }
-    
-    #name zcr cols
-    zcr_col_labels <- c()
-    for (i in 1:length(zcr_full_data)) {
-      zcr_col_labels <- append(zcr_col_labels, paste("zcr", i, sep = "."))
-    }
-    colnames(zcr_full_data) <- zcr_col_labels
-    
-    full_data <- cbind(full_data, zcr_full_data)
-    
-  }
-  #### MFCC
-  if(mfcc == TRUE) {
-    mfcc_full_data <- data.table()
-    
-    for (x in wave.seq[-length(wave.seq)]) {
-      temp.wave <- readWave(filepath, from = x, to = x + 3, units = 'seconds') 
-      mfcc_data <- melfcc(temp.wave)
-      mfcc_data <- as.vector(t(mfcc_data))
-      mfcc_data <- as.data.table(t(mfcc_data))
-      mfcc_full_data <- rbind(mfcc_full_data, mfcc_data)
-    }
-    mfcc_col_labels <- c()
-    for (i in 1:length(mfcc_full_data)) {
-      mfcc_col_labels <- append(mfcc_col_labels, paste('mfcc', i, sep = "."))
-    }
-    setnames(mfcc_full_data, old = colnames(mfcc_full_data), new = mfcc_col_labels)
-    full_data <- cbind(full_data, mfcc_full_data)
-  }
-  ####Acoustat functions here
-  
-  if (acoustat.data == TRUE) {
-    aco_time_data <- data.table()
-    
-    for (x in wave.seq[-length(wave.seq)]) {
-      temp.wave <- readWave(filepath, from = x, to = x + 3, units = 'seconds')  
-      
-      aco.data <- acoustat(temp.wave, flim = flim, plot = FALSE)
-      aco.time <- as.data.table(aco.data$time.contour[, 2])
-      aco.time <- as.data.table(t(aco.time))
-      aco_time_data <- rbind(aco_time_data, aco.time)
-    }
-    
-    #naming tc cols 
-    aco_col_labels <- c()
-    for (i in 1:length(aco_time_data)) {
-      aco_col_labels <- append(aco_col_labels, paste("tc", i, sep = "."))
-    }
-    
-    colnames(aco_time_data) <- aco_col_labels
-    
-    full_data <- cbind(full_data, aco_time_data)
-    
-    
-    
-    ### add acoustat extraction here
-    
-    aco_freq_data <- data.table()
-    
-    for (x in wave.seq[-length(wave.seq)]) {
-      temp.wave <- readWave(filepath, from = x, to = x + 3, units = 'seconds')  
-      
-      aco.data <- acoustat(temp.wave, flim = flim, plot = FALSE)
-      aco.freq <- as.data.table(aco.data$freq.contour[, 2])
-      aco.freq <- as.data.table(t(aco.freq))
-      aco_freq_data <- rbind(aco_freq_data, aco.freq)
-    }
-    
-    #naming tc cols 
-    aco_freq_labels <- c()
-    for (i in 1:length(aco_freq_data)) {
-      aco_freq_labels <- append(aco_freq_labels, paste("fc", i, sep = "."))
-    }
-    
-    colnames(aco_freq_data) <- aco_freq_labels
-    
-    full_data <- cbind(full_data, aco_freq_data)
-    
-    
-    ##### Final acoustat shit
-    aco_misc_data <- data.table()
-    
-    for (x in wave.seq[-length(wave.seq)]) {
-      temp.wave <- readWave(filepath, from = x, to = x + 3, units = 'seconds')
-      aco.data <- acoustat(temp.wave, flim = flim, plot = FALSE)
-      misc.data <- as.data.table(aco.data[3:length(aco.data)])
-      aco_misc_data <- rbind(aco_misc_data, misc.data)
-      
-    }
-    
-    full_data <- cbind(full_data, aco_misc_data)
-    
-  }
-  # Add filepath info
-  full_data[,filepath := filepath]
-  
-  ##Scale
-  
-  if (scaled == TRUE) {
-    
-    scale.cols <- colnames(full_data)
-    
-    scale.cols <- scale.cols[-length(scale.cols)]
-    full_data[, (scale.cols) := lapply(.SD, scale), .SDcols = scale.cols]
-  }
-  
-  return(full_data)
-}
-
-
-############ Easy exploration 
-pullGoodWave <- function(data, species, det_num, start_buffer = 0, end_buffer = 0, time_buffer = 0 ) {
-  pullWave(data[common_name == species][order(-confidence)], det_num, start_buffer = start_buffer, end_buffer = end_buffer, time.buffer = time_buffer)
-}
