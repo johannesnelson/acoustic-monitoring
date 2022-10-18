@@ -136,6 +136,9 @@ verify_results <- function (data, species = "all", conf = 0, temp.length = 'none
       # piece could be refined. 
       
       if(answer == "t") {
+        if(template.mode == FALSE) {
+          template_DT <- data.table()
+        }
         repeat {
           wave.obj.2 <- readWave(data$filepath[i], from = data$start[i] - 1, to = data$end[i] + 1, units = 'seconds')
           tempSpec <- spectro(wave.obj.2, fastdisp = TRUE)
