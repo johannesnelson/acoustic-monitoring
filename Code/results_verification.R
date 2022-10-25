@@ -214,6 +214,7 @@ verify_results <- function (data, species = "all", conf = 0, temp.length = 'none
     
     write.csv(data, paste0(fname, ".csv"), row.names = FALSE)
   }
+  template_DT <<-template_DT
   return(data)
   
 } 
