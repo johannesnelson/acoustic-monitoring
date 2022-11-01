@@ -204,7 +204,7 @@ verify_results <- function (data, species = "all", conf = 0, temp.length = 'none
     if(answer == "q") {
       
       data$verification[i:nrow(data)] <- data$verification[i:nrow(data)]
-      template_DT <<-template_DT
+  
       break}
     
   }
@@ -214,7 +214,11 @@ verify_results <- function (data, species = "all", conf = 0, temp.length = 'none
     
     write.csv(data, paste0(fname, ".csv"), row.names = FALSE)
   }
-  template_DT <<-template_DT
+  
+  saveask2 <- readline(prompt = "Would you like to save the template data to the environment? \n Input 'y' for yes:")
+  if(saveask2 == 'y'){
+    template_DT <<-template_DT
+  }
   return(data)
   
 } 
@@ -477,5 +481,167 @@ batch_load <- function (dir) {
 }
 
 
+### This function allows some basic annotation by letting you page through a recording with a specified page length, 
+### labeling a verification column with either 'y' or 'n' (or some other options), indicating presence or absence
+### of a target species. An option 'a' allows to annotate a notes column with a character string
 
+annotate_recording <- function (file_path, page_length, template_mode = FALSE, temp_length = 3) {
+  
+  wave_obj <- readWave(file_path)
+  wave_dur <- length(wave_obj@left)/wave_obj@samp.rate
+  wave_seq <- seq(0, wave_dur, page_length)
+  annotationDT <- data.table(filepath = file_path, start = wave_seq, end = wave_seq + page_length, verification = NA, notes = NA)
+  
+  
+  verifs <- c()
+  verif.options <- c("y", "n", "r", "q", "s")
+  all.options <- c("y", "n", "r", "q", "p", "s", "w", "a", "t")
+  if (template_mode == TRUE) {
+    template_DT <- data.table()
+  }
+  
+  # Skip over observations where verification is already defined
+  
+  for (i in 1:nrow(annotationDT)) {
+    if(!is.na(annotationDT$verification[i])){
+      cat(paste("\n Verification for", basename(annotationDT$filepath[i]), "at", annotationDT$start[i], "seconds already exists. Moving onto next detection...\n"))
+      annotationDT$verification[i] <- annotationDT$verification[i]
+      next}
+    
+    # Begin main repeat loop where spectrograms are shown with options for user to input into console
+    
+    repeat{
+      
+      viewSpec(annotationDT$filepath[i], start.time = annotationDT$start[i]-1, page.length = page_length, units = 'seconds'  )
+      cat(paste("\n Showing detection", i, "out of", nrow(annotationDT), "from", basename(annotationDT$filepath[i]), "at", annotationDT$start[i], "seconds. Confidence:", annotationDT$confidence[i], "\n"))
+      
+      cat(paste( "Enter \n 'y' for yes,\n",  
+                 "'n' for no,\n",
+                 "'r' for review,\n",
+                 "'p' to play audio segment,\n", 
+                 "'w' to write segment as wav file to working directory,\n",
+                 "'s' to skip to next segment (and log as NA)",
+                 "'a' to add a note \n",
+                 "'q' for quit."))
+      
+      answer <- readline( prompt = paste0(paste("Is the target species present?")))
+      
+      
+      if(answer %in% verif.options) break
+      
+      # Option to play sound
+      if(answer == "p") {
+        tempwave <- readWave(annotationDT$filepath[i], from = annotationDT$start[i], to = annotationDT$end[i], units = "seconds")
+        play(tempwave)
+      }
+      # Option to write sound to wav file in working directory
+      if(answer == "w") {
+        filename <- paste0(paste(gsub(pattern = ".WAV", "", basename(annotationDT$filepath[i])), annotationDT$start[i], sep = "_"), ".WAV")
+        tempwave <- readWave(annotationDT$filepath[i], from = annotationDT$start[i] - 1, to = annotationDT$end[i] + 1, units = "seconds")
+        writeWave(tempwave, filename)
+        cat("\n Writing wav file to working directory...")
+      }
+      
+      # Option to add a note in the notes column
+      if(answer == "a") {
+        
+        note <- readline(prompt = "Add note here: ")
+        annotationDT$notes[i] <- note
+      }
+      
+      # This 'template mode' section is still in development. It allows you to click on the center of a detection and specify a temp.length. 
+      # When quitting out of function, it will save a template_DT which is effectively a new set of detections, but with
+      # a smaller time window (end - start) will be equal to temp.length and centered on the actual detection. The reason
+      # for this is when extracting features to fit ML models, the 3 seconds birdNET window is often too large and has 
+      # a lot of unwanted information. This function should allow you to use high confidnce birdNET detections to create
+      # a stronger training set for ML purposes. As it is, it is finnicky and the visualization/locator() selection 
+      # piece could be refined. 
+      
+      if(answer == "t") {
+        if(template_mode == FALSE) {
+          template_DT <- data.table()
+        }
+        repeat {
+          wave.obj.2 <- readWave(annotationDT$filepath[i], from = annotationDT$start[i] - 1, to = annotationDT$end[i] + 1, units = 'seconds')
+          tempSpec <- spectro(wave.obj.2, fastdisp = TRUE)
+          t.bins <- tempSpec$time
+          n.t.bins <- length(t.bins)
+          which.t.bins <- 1:n.t.bins
+          which.frq.bins <- which(tempSpec$freq >= 0)
+          frq.bins <- tempSpec$freq
+          amp <- round(tempSpec$amp[which.frq.bins, ], 2)
+          n.frq.bins <- length(frq.bins)
+          ref.matrix <- matrix(0, nrow = n.frq.bins, ncol = n.t.bins)
+          
+          
+          if (temp.length == 'none') {
+            t.value <- as.numeric(readline("How many seconds long would you like the templates to be?"))
+          }else {
+            t.value <- temp.length
+          }
+          # f.min <- as.numeric(readline("What would you like the minimum frequency to be in Hz?"))
+          # f.max <- as.numeric(readline("What would you like the maximum frequency to be in Hz?"))
+          cat("Click the plot where you would like to center this template")
+          ctr.pt <- locator(n = 1)
+          
+          temp.DT <- data.table(filepath = annotationDT[i, filepath], 
+                                common_name = annotationDT[i, common_name], 
+                                start = (annotationDT[i, start] -1) + ctr.pt$x - (t.value/2), 
+                                end = (annotationDT[i, start] -1) + ctr.pt$x +(t.value/2),
+                                center.freq = ctr.pt$y
+                                # frq.min = f.min, 
+                                # frq.max = f.max)
+          )
+          template_DT <-  rbind(template_DT, temp.DT)
+          
+          # image(ref.matrix, 
+          #     xlim = c(ctr.pt$x - (.5*t.value), ctr.pt$x + (.5*t.value)),
+          #   ylim = c(f.min, f.max),
+          #   col = 'orange',
+          #   add = TRUE)
+          {break}
+        }
+        dev.off()
+      }
+      
+      
+      if(!answer %in% all.options){
+        cat("\n Response not recognized, please input correct response...\n")
+      }
+      
+    }
+    
+    # add verification character to verification column
+    if(answer %in% c("y", "n", "r")) {
+      cat("\n Adding result to verification data...\n ")
+      annotationDT$verification[i] <- answer
+    }
+    # skip observation (leave as NA)
+    if(answer == "s") {
+      annotationDT$verification[i] <- NA
+      cat("Skipping to next detection...")
+    }
+    
+    # quitting will lead to csv saving options
+    if(answer == "q") {
+      
+      annotationDT$verification[i:nrow(annotationDT)] <- annotationDT$verification[i:nrow(annotationDT)]
+      
+      break}
+    
+  }
+  saveask <- readline(prompt = "Would you like to save results as a csv file? \n Input 'y' for yes:")
+  if(saveask == "y") {
+    fname <- readline(prompt = "What would you like to name the file?")
+    
+    write.csv(annotationDT, paste0(fname, ".csv"), row.names = FALSE)
+  }
+  
+  saveask2 <- readline(prompt = "Would you like to save the template data to the environment? \n Input 'y' for yes:")
+  if(saveask2 == 'y'){
+    template_DT <<-template_DT
+  }
+  return(annotationDT)
+  
+} 
 
