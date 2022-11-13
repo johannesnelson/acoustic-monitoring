@@ -14,33 +14,6 @@ library(data.table)
 
 
 
-# This will name all files in a directory (usually SD card) according to the arguments of locID and eqID 
-# so that "locationID_deviceID_YYYYMMDD_HHMMSS.WAV" becomes the naming convention. This will help a great
-# deal with organization and later analysis, since each filename is encoded with a lot of crucial information
-
-
-nameFiles <- function(directory, new_directory, locID, eqID) {
-  
-  file.vector <- list.files(directory) 
-  current.dir <- getwd()
-  setwd(directory)
-  for (oldname in file.vector) {
-    file.rename(from = oldname, to = paste(locID, eqID, basename(oldname), sep = '_'))
-  }
-  new.file.vector <- list.files()
-  file.copy(new.file.vector, new_directory)  #note, the original files are not deleted so that you can verify successful copying before wiping sd card clean
-  setwd(current.dir)
-}
-
-
-# This just adds the 'write' step to the NDSA acoustics function which gathers all BirdNET csv's into a single data.table
-
-gather_write <- function(directory, filename) {
-  all.results <- birdnet_gather(results.directory = directory, formatted = FALSE)
-  write.csv(all.results, paste(directory, filename, sep = '/'), row.names = FALSE)
-  return(all.results)
-}
-
 
 # This function allows easy visual scanning of results with options to play, save wave files, write notes, etc. Be sure either to 
 # assign the result to an object or to choose the save as csv option at the end. If you 'esc' mid verification, you will lose
@@ -223,6 +196,35 @@ verify_results <- function (data, species = "all", conf = 0, temp.length = 'none
   
 } 
 
+
+
+
+# This will name all files in a directory (usually SD card) according to the arguments of locID and eqID 
+# so that "locationID_deviceID_YYYYMMDD_HHMMSS.WAV" becomes the naming convention. This will help a great
+# deal with organization and later analysis, since each filename is encoded with a lot of crucial information
+
+
+nameFiles <- function(directory, new_directory, locID, eqID) {
+  
+  file.vector <- list.files(directory) 
+  current.dir <- getwd()
+  setwd(directory)
+  for (oldname in file.vector) {
+    file.rename(from = oldname, to = paste(locID, eqID, basename(oldname), sep = '_'))
+  }
+  new.file.vector <- list.files()
+  file.copy(new.file.vector, new_directory)  #note, the original files are not deleted so that you can verify successful copying before wiping sd card clean
+  setwd(current.dir)
+}
+
+
+# This just adds the 'write' step to the NDSA acoustics function which gathers all BirdNET csv's into a single data.table
+
+gather_write <- function(directory, filename) {
+  all.results <- birdnet_gather(results.directory = directory, formatted = FALSE)
+  write.csv(all.results, paste(directory, filename, sep = '/'), row.names = FALSE)
+  return(all.results)
+}
 
 
 # The NSNSDA function birdnet_plot() requires certain columns to exist. This will create them. 
@@ -472,9 +474,9 @@ pullGoodWave <- function(data, species, det_num, start_buffer = 0, end_buffer = 
 
 # I can't remember why I thought I needed this, but I am leaving it here until I do
 
-batch_load <- function (dir) {
+batch_load <- function (dir, pattern = NULL) {
   
-  filenames <- list.files(dir)
+  filenames <- list.files(dir, pattern = pattern )
   filenames <- paste(dir, filenames, sep = '\\')
   mergeddata <- vroom(filenames)
   return(mergeddata)
@@ -485,13 +487,19 @@ batch_load <- function (dir) {
 ### labeling a verification column with either 'y' or 'n' (or some other options), indicating presence or absence
 ### of a target species. An option 'a' allows to annotate a notes column with a character string
 
-annotate_recording <- function (file_path, page_length, template_mode = FALSE, temp_length = 3) {
+annotate_recording <- function (file_path, past_annos = NULL, page_length, template_mode = FALSE, temp_length = 3, species = NULL) {
   
   wave_obj <- readWave(file_path)
   wave_dur <- length(wave_obj@left)/wave_obj@samp.rate
   wave_seq <- seq(0, wave_dur, page_length)
-  annotationDT <- data.table(filepath = file_path, start = wave_seq, end = wave_seq + page_length, verification = NA, notes = NA)
   
+  if(is.null(past_annos)){
+  annotationDT <- data.table(filepath = file_path, common_name = species, start = wave_seq, end = wave_seq + page_length, verification = NA, notes = NA)
+  }
+  
+  if(!is.null(past_annos)){
+    annotationDT <- past_annos
+  }
   
   verifs <- c()
   verif.options <- c("y", "n", "r", "q", "s")
@@ -574,10 +582,10 @@ annotate_recording <- function (file_path, page_length, template_mode = FALSE, t
           ref.matrix <- matrix(0, nrow = n.frq.bins, ncol = n.t.bins)
           
           
-          if (temp.length == 'none') {
+          if (temp_length == 'none') {
             t.value <- as.numeric(readline("How many seconds long would you like the templates to be?"))
           }else {
-            t.value <- temp.length
+            t.value <- temp_length
           }
           # f.min <- as.numeric(readline("What would you like the minimum frequency to be in Hz?"))
           # f.max <- as.numeric(readline("What would you like the maximum frequency to be in Hz?"))
@@ -639,7 +647,8 @@ annotate_recording <- function (file_path, page_length, template_mode = FALSE, t
   
   saveask2 <- readline(prompt = "Would you like to save the template data to the environment? \n Input 'y' for yes:")
   if(saveask2 == 'y'){
-    template_DT <<-template_DT
+    csv_name <- readline(prompt = 'What would you like to name it?')
+    write.csv(template_DT, paste0(csv_name, ".csv"), row.names = FALSE)
   }
   return(annotationDT)
   
